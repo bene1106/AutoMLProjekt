@@ -1,0 +1,44 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+.env/
+
+# ── Jupyter ────────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Data cache (large CSV files downloaded/generated at runtime) ───────────────
+regime_algo_selection/data/cache/
+
+# ── Results (generated plots and CSVs — reproducible from code) ────────────────
+results/
+
+# ── Log files ─────────────────────────────────────────────────────────────────
+*.log
+
+# ── OS / editor artefacts ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Secrets & credentials ─────────────────────────────────────────────────────
+.env
+*.env
+secrets.json

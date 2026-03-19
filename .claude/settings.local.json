@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python test_step1_2.py)",
+      "Bash(python -c \":*)",
+      "Bash(python -m regime_algo_selection.experiments.replot_analyses)",
+      "Bash(python -m regime_algo_selection.experiments.compute_rank_stability)",
+      "Bash(tasklist)",
+      "Bash(python -u -m regime_algo_selection.experiments.plan4_full)",
+      "Bash(powershell \"Stop-Process -Id 63020 -Force\")",
+      "Bash(python experiments/regime_classifier_v2/01_build_dataset.py)",
+      "Bash(python experiments/regime_classifier_v2/02_train_evaluate.py)",
+      "Bash(python experiments/regime_classifier_v2/03_analyze_results.py)",
+      "Bash(python experiments/regime_classifier_v2/04_ablation_study.py)",
+      "Bash(python experiments/regime_classifier_v2/05_optimize_classifier.py)",
+      "Bash(python experiments/regime_classifier_v2/05_confusion_matrices.py)",
+      "Bash(python -c \"import torch; print\\(''torch'', torch.__version__\\)\")",
+      "Bash(python -c \"import xgboost; print\\(''xgb'', xgboost.__version__\\)\")",
+      "Bash(python -c \"import sklearn; print\\(''sklearn'', sklearn.__version__\\)\")",
+      "Bash(python -c \"import seaborn; print\\(''seaborn ok''\\)\")",
+      "Bash(python experiments/regime_classifier_v2/06_max_accuracy.py)",
+      "Bash(python -c \"import hmmlearn; print\\(''''hmmlearn ok''''\\)\")",
+      "Bash(pip install:*)",
+      "Bash(python -c \"import torch; print\\(''torch'', torch.__version__\\); import xgboost; print\\(''xgb ok''\\)\")"
+    ]
+  }
+}
