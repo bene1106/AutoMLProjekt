@@ -776,6 +776,20 @@ def summarise_records(records):
     return out
 
 
+def select_representative_params(params_list):
+    """Return the most common parameter dict across folds."""
+    if not params_list:
+        return {}
+    counts = {}
+    by_key = {}
+    for params in params_list:
+        key = json.dumps(params, sort_keys=True, default=str)
+        counts[key] = counts.get(key, 0) + 1
+        by_key[key] = dict(params)
+    best_key = max(counts, key=counts.get)
+    return by_key[best_key]
+
+
 def run_phase0(dataset_cache, regime, tenure, vix, features_df):
     """
     Phase 0: Compare label variants (any_shift, persist_2, persist_3, persist_5)
@@ -1151,9 +1165,10 @@ def run_phase2(features_df, regime, tenure, vix,
     feature_sets = get_feature_sets()
     fcols        = feature_sets[best_feature_set]
 
-    all_model_results  = {}
-    all_model_probas   = {}
-    all_model_cms      = {}
+    all_model_results   = {}
+    all_model_probas    = {}
+    all_model_cms       = {}
+    all_model_best_params = {}
     overfitting_records = []
 
     for H in HORIZONS_PRIMARY:
@@ -1197,6 +1212,7 @@ def run_phase2(features_df, regime, tenure, vix,
         all_model_results[key]  = lr_records
         all_model_probas[key]   = (lr_ytrue, lr_yprob)
         all_model_cms[key]      = lr_cm
+        all_model_best_params[key] = select_representative_params(lr_params)
         for rec in lr_records:
             overfitting_records.append({
                 "model": "LR", "H": H,
@@ -1243,6 +1259,7 @@ def run_phase2(features_df, regime, tenure, vix,
             all_model_results[key]  = xgb_records
             all_model_probas[key]   = (xgb_ytrue, xgb_yprob)
             all_model_cms[key]      = xgb_cm
+            all_model_best_params[key] = select_representative_params(xgb_params)
             for rec in xgb_records:
                 overfitting_records.append({
                     "model": "XGB", "H": H,
@@ -1278,6 +1295,7 @@ def run_phase2(features_df, regime, tenure, vix,
             all_model_results[key]  = rf_records
             all_model_probas[key]   = (rf_ytrue, rf_yprob)
             all_model_cms[key]      = rf_cm
+            all_model_best_params[key] = select_representative_params(rf_params)
             for rec in rf_records:
                 overfitting_records.append({
                     "model": "RF", "H": H,
@@ -1325,11 +1343,14 @@ def run_phase2(features_df, regime, tenure, vix,
             best_model_name = key.split("_")[0]
             best_H2        = int(key.split("H")[1])
 
+    best_model_key = f"{best_model_name}_H{best_H2}"
+    best_phase2_params = all_model_best_params.get(best_model_key, {})
+
     print(f"\nBest model: [{best_model_name}] at H={best_H2}  avg_f1={best_avg_f1:.3f}")
     print(f"Phase 2 completed in {(time.time()-phase_start)/60:.1f} min")
 
     return (all_model_results, all_model_probas, all_model_cms,
-            overfitting_records, best_model_name, best_H2)
+            overfitting_records, best_model_name, best_H2, best_phase2_params)
 
 
 def save_phase2_outputs(all_model_results, all_model_probas,
@@ -1430,6 +1451,7 @@ def run_phase3(features_df, regime, tenure, vix,
 
     feature_sets = get_feature_sets()
     fcols        = feature_sets[best_feature_set]
+    phase2_best_params = dict(phase2_best_params or {})
 
     rows     = []
     cm_per_H = {}
@@ -1451,6 +1473,12 @@ def run_phase3(features_df, regime, tenure, vix,
                         random_state=RANDOM_SEED)),
                 ])
             def get_grid(n_neg, n_pos, n_feats):
+                if phase2_best_params:
+                    fixed_params = dict(phase2_best_params)
+                    k = fixed_params.get("select__k", "all")
+                    if k != "all" and isinstance(k, (int, np.integer)) and k >= n_feats:
+                        fixed_params["select__k"] = "all"
+                    return {k: [v] for k, v in fixed_params.items()}
                 valid_k = sorted(set(
                     [k for k in [3, 5] if k < n_feats] + ["all"]))
                 return {
@@ -1468,6 +1496,8 @@ def run_phase3(features_df, regime, tenure, vix,
                     use_label_encoder=False, eval_metric="logloss",
                     random_state=RANDOM_SEED, verbosity=0)
             def get_grid(n_neg, n_pos, n_feats):
+                if phase2_best_params:
+                    return {k: [v] for k, v in phase2_best_params.items()}
                 r = n_neg / max(n_pos, 1)
                 return {
                     "n_estimators":  [100, 200],
@@ -1477,6 +1507,24 @@ def run_phase3(features_df, regime, tenure, vix,
                     "subsample":     [0.8, 1.0],
                 }
             use_rand = True
+            n_iter   = 50
+        elif best_model_name == "RF" and HAS_RF:
+            def get_model(n_neg, n_pos):
+                return RandomForestClassifier(random_state=RANDOM_SEED)
+            def get_grid(n_neg, n_pos, n_feats):
+                if phase2_best_params:
+                    return {k: [v] for k, v in phase2_best_params.items()}
+                return {
+                    "n_estimators": [100, 300],
+                    "max_depth":    [5, 10, None],
+                    "class_weight": [
+                        "balanced",
+                        {0: 1, 1: 5},
+                        {0: 1, 1: 10},
+                    ],
+                    "min_samples_leaf": [1, 5],
+                }
+            use_rand = False
             n_iter   = 50
         else:
             # Fallback to simple LR
@@ -1592,6 +1640,7 @@ def save_phase3_outputs(rows, cm_per_H, out_dir):
 def run_phase4(features_df, regime, tenure, vix,
                best_label_variant, best_min_persistence,
                best_feature_set, best_model_name, best_H,
+               phase2_best_params,
                phase0_rows, phase1_rows):
     """
     Phase 4: Final model — one full walk-forward with complete per-fold logging,
@@ -1604,6 +1653,7 @@ def run_phase4(features_df, regime, tenure, vix,
 
     feature_sets = get_feature_sets()
     fcols        = feature_sets[best_feature_set]
+    phase2_best_params = dict(phase2_best_params or {})
     ds           = build_dataset(features_df, regime, tenure, vix,
                                  best_H, best_min_persistence)
     available    = [c for c in fcols if c in ds.columns]
@@ -1622,6 +1672,12 @@ def run_phase4(features_df, regime, tenure, vix,
                     solver="saga", max_iter=2000, random_state=RANDOM_SEED)),
             ])
         def get_grid(n_neg, n_pos, n_feats):
+            if phase2_best_params:
+                fixed_params = dict(phase2_best_params)
+                k = fixed_params.get("select__k", "all")
+                if k != "all" and isinstance(k, (int, np.integer)) and k >= n_feats:
+                    fixed_params["select__k"] = "all"
+                return {k: [v] for k, v in fixed_params.items()}
             valid_k = sorted(set(
                 [k for k in [3, 5] if k < n_feats] + ["all"]))
             return {
@@ -1641,6 +1697,8 @@ def run_phase4(features_df, regime, tenure, vix,
                 use_label_encoder=False, eval_metric="logloss",
                 random_state=RANDOM_SEED, verbosity=0)
         def get_grid(n_neg, n_pos, n_feats):
+            if phase2_best_params:
+                return {k: [v] for k, v in phase2_best_params.items()}
             r = n_neg / max(n_pos, 1)
             return {
                 "n_estimators":    [100, 200, 500],
@@ -1655,6 +1713,22 @@ def run_phase4(features_df, regime, tenure, vix,
             }
         use_rand     = True
         n_iter_p4    = XGB_N_ITER_REDUCED if runtime_exceeded() else XGB_N_ITER_FULL
+    elif best_model_name == "RF" and HAS_RF:
+        def get_model(n_neg, n_pos):
+            return RandomForestClassifier(random_state=RANDOM_SEED)
+        def get_grid(n_neg, n_pos, n_feats):
+            if phase2_best_params:
+                return {k: [v] for k, v in phase2_best_params.items()}
+            return {
+                "n_estimators": [100, 300],
+                "max_depth":    [5, 10, None],
+                "class_weight": [
+                    "balanced", {0:1,1:5}, {0:1,1:10},
+                ],
+                "min_samples_leaf": [1, 5],
+            }
+        use_rand  = False
+        n_iter_p4 = 150
     else:
         def get_model(n_neg, n_pos):
             return LogisticRegression(
@@ -2075,7 +2149,7 @@ def main():
               "LR will run fully; XGB n_iter=100; RF skipped.")
 
     (p2_results, p2_probas, p2_cms,
-     p2_ov, best_model, best_H2) = run_phase2(
+     p2_ov, best_model, best_H2, p2_best_params) = run_phase2(
         features_df, regime, tenure, vix,
         best_label, best_persist, best_feat_set,
     )
@@ -2086,7 +2160,7 @@ def main():
     # -------------------------------------------------------------------------
     phase3_rows, cm_per_H, best_H3 = run_phase3(
         features_df, regime, tenure, vix,
-        best_label, best_persist, best_feat_set, best_model,
+        best_label, best_persist, best_feat_set, best_model, p2_best_params,
     )
     save_phase3_outputs(phase3_rows, cm_per_H, OUT_DIR)
 
@@ -2099,6 +2173,7 @@ def main():
     result = run_phase4(
         features_df, regime, tenure, vix,
         best_label, best_persist, best_feat_set, best_model, final_H,
+        p2_best_params,
         phase0_rows, phase1_rows,
     )
 
