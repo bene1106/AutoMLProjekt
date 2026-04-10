@@ -21,7 +21,8 @@
       "Bash(python experiments/regime_classifier_v2/06_max_accuracy.py)",
       "Bash(python -c \"import hmmlearn; print\\(''''hmmlearn ok''''\\)\")",
       "Bash(pip install:*)",
-      "Bash(python -c \"import torch; print\\(''torch'', torch.__version__\\); import xgboost; print\\(''xgb ok''\\)\")"
+      "Bash(python -c \"import torch; print\\(''torch'', torch.__version__\\); import xgboost; print\\(''xgb ok''\\)\")",
+      "Bash(python -u -m regime_algo_selection.experiments.plan5_meta_learner)"
     ]
   }
 }
