@@ -22,7 +22,9 @@
       "Bash(python -c \"import hmmlearn; print\\(''''hmmlearn ok''''\\)\")",
       "Bash(pip install:*)",
       "Bash(python -c \"import torch; print\\(''torch'', torch.__version__\\); import xgboost; print\\(''xgb ok''\\)\")",
-      "Bash(python -u -m regime_algo_selection.experiments.plan5_meta_learner)"
+      "Bash(python -u -m regime_algo_selection.experiments.plan5_meta_learner)",
+      "Bash(python -c \"from regime_algo_selection.experiments.plan13a_lambda_sweep import run_lambda_sweep, LAMBDA_SPEC_VALUES, SWEEP_CONFIG; print\\('Import OK'\\); print\\('lambda_spec values:', LAMBDA_SPEC_VALUES\\); print\\('specialist_epochs:', SWEEP_CONFIG['specialist_epochs']\\)\")",
+      "Bash(python -u -m regime_algo_selection.experiments.plan13a_lambda_sweep)"
     ]
   }
 }

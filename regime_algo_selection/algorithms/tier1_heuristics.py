@@ -283,7 +283,8 @@ def build_algorithm_space(tiers: list = None) -> list:
     ----------
     tiers : list of int, default [1]
         Which tiers to include. Use [1] for Tier 1 only (K=48),
-        [1, 2] for Tier 1 + Tier 2 (K=81).
+        [1, 2] for Tier 1 + Tier 2 (K=81),
+        [1, 2, 3] for all tiers (K=117).
 
     Returns
     -------
@@ -293,11 +294,13 @@ def build_algorithm_space(tiers: list = None) -> list:
         tiers = [1]
 
     from regime_algo_selection.algorithms.tier2_linear import build_tier2_algorithm_space
+    from regime_algo_selection.algorithms.tier3_nonlinear import build_tier3_algorithms
 
     tier1_algos = _build_tier1_list() if 1 in tiers else []
     tier2_algos = build_tier2_algorithm_space() if 2 in tiers else []
+    tier3_algos = build_tier3_algorithms() if 3 in tiers else []
 
-    algos = tier1_algos + tier2_algos
-    n1, n2 = len(tier1_algos), len(tier2_algos)
-    print(f"Built K={len(algos)} algorithms: {n1} Tier 1, {n2} Tier 2")
+    algos = tier1_algos + tier2_algos + tier3_algos
+    n1, n2, n3 = len(tier1_algos), len(tier2_algos), len(tier3_algos)
+    print(f"Built K={len(algos)} algorithms: {n1} Tier 1, {n2} Tier 2, {n3} Tier 3")
     return algos

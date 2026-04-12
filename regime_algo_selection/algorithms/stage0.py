@@ -85,11 +85,42 @@ def pretrain_tier2_algorithms(
     -------
     list : same algorithms, with Tier 2 algorithms now fitted.
     """
-    tier2 = [a for a in algorithms if isinstance(a, TrainablePortfolioAlgorithm)]
-    if not tier2:
+    return pretrain_algorithms(algorithms, asset_features, returns, train_start, train_end)
+
+
+def pretrain_algorithms(
+    algorithms: list,
+    asset_features: pd.DataFrame,
+    returns: pd.DataFrame,
+    train_start: str,
+    train_end: str,
+) -> list:
+    """
+    Pre-train all trainable algorithms (Tier 2 + Tier 3).
+
+    Tier 1 algorithms are left untouched. TrainablePortfolioAlgorithm subclasses
+    (Tier 2 and Tier 3) have fit() called with training-period features and returns.
+
+    Parameters
+    ----------
+    algorithms : list of PortfolioAlgorithm
+        Mixed list of Tier 1, Tier 2, and Tier 3 algorithms.
+    asset_features : pd.DataFrame
+        Full-period asset features (MultiIndex columns).
+    returns : pd.DataFrame
+        Full-period forward returns.
+    train_start, train_end : str
+        Training period boundaries (inclusive).
+
+    Returns
+    -------
+    list : same algorithms, with trainable algorithms now fitted.
+    """
+    trainable = [a for a in algorithms if isinstance(a, TrainablePortfolioAlgorithm)]
+    if not trainable:
         return algorithms
 
-    print(f"  Stage 0: pre-training {len(tier2)} Tier 2 algorithms "
+    print(f"  Stage 0: pre-training {len(trainable)} Tier 2+3 algorithms "
           f"({train_start[:4]}-{train_end[:4]}) ...")
 
     X_train, Y_train = build_training_matrix(
@@ -101,7 +132,7 @@ def pretrain_tier2_algorithms(
         return algorithms
 
     n_fitted = 0
-    for algo in tier2:
+    for algo in trainable:
         try:
             algo.fit(X_train, Y_train)
             if algo.is_fitted:
@@ -112,6 +143,6 @@ def pretrain_tier2_algorithms(
         except Exception as e:
             print(f"  Stage 0: fit failed for {algo.name}: {e}")
 
-    print(f"  Stage 0 complete: {n_fitted}/{len(tier2)} Tier 2 algorithms fitted "
+    print(f"  Stage 0 complete: {n_fitted}/{len(trainable)} trainable algorithms fitted "
           f"(training rows: {len(X_train)}, features: {X_train.shape[1]})")
     return algorithms
