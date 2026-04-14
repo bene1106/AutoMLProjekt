@@ -66,7 +66,7 @@ CONFIG = {
     # Training Phase A (Specialists)
     "specialist_lr": 0.005,
     "specialist_epochs": 80,
-    "lambda_spec": 0.05,
+    "lambda_spec": 0.03,       # optimal from lambda sweep (H(beta)=0.562, Sharpe=+0.105)
 
     # Training Phase B (Tier Selector)
     "selector_lr": 0.005,
@@ -99,7 +99,9 @@ SANITY_CONFIG = {
 }
 
 PLAN13A_RESULTS_DIR = os.path.join(RESULTS_DIR, "plan13a_hierarchical")
+PLAN13A_CACHE_DIR   = os.path.join(PLAN13A_RESULTS_DIR, "cache")
 os.makedirs(PLAN13A_RESULTS_DIR, exist_ok=True)
+os.makedirs(PLAN13A_CACHE_DIR,   exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # Metric helpers  (same as Plan 12)
@@ -265,8 +267,16 @@ def run_fold(
     )
     dataset.fit_scaler(train_start, train_end)
 
-    print("  Precomputing algorithm outputs (slow step) ...", flush=True)
-    dataset.precompute_algo_outputs()
+    cache_path = os.path.join(PLAN13A_CACHE_DIR, f"fold_{fold_id:02d}_algo_outputs.npy")
+    if os.path.exists(cache_path):
+        print(f"  Loading precomputed algo outputs from cache: {cache_path}", flush=True)
+        dataset._algo_outputs = np.load(cache_path)
+        print(f"  Cache loaded: shape={dataset._algo_outputs.shape}", flush=True)
+    else:
+        print("  Precomputing algorithm outputs (batch-optimised) ...", flush=True)
+        dataset.batch_precompute_algo_outputs()
+        np.save(cache_path, dataset._algo_outputs)
+        print(f"  Saved algo outputs to cache: {cache_path}", flush=True)
 
     train_idx = dataset.get_indices_for_period(train_start, train_end)
     test_idx  = dataset.get_indices_for_period(test_start,  test_end)
@@ -463,7 +473,7 @@ def _print_summary(fold_results: list) -> None:
     sep = "-" * len(header)
 
     print("\n" + "=" * 70, flush=True)
-    print("PLAN 13a: HIERARCHICAL META-LEARNER — SANITY CHECK RESULTS", flush=True)
+    print("PLAN 13a: HIERARCHICAL META-LEARNER — RESULTS", flush=True)
     print("=" * 70, flush=True)
     print(header, flush=True)
     print(sep, flush=True)
@@ -695,5 +705,5 @@ def run_experiment(config: dict = CONFIG) -> list:
 
 
 if __name__ == "__main__":
-    # SANITY CHECK: 2 folds only
-    run_sanity_check()
+    # Full 12-fold experiment with lambda_spec=0.03 (optimal from sweep)
+    run_experiment()

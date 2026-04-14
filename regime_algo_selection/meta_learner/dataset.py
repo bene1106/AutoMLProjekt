@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
+from regime_algo_selection.algorithms.base import TrainablePortfolioAlgorithm
+
 
 # 5 features per asset, matching the plan's initial feature set
 SELECTED_FEATURES = ["ret_1d", "ret_5d", "ret_20d", "vol_20d", "mom_60d"]
@@ -181,6 +183,243 @@ class MetaLearnerDataset:
                     outputs[i, k] = ew
 
         print(f"\r    Precomputed algo outputs: {T}/{T} done.        ")
+        self._algo_outputs = outputs
+
+    # ------------------------------------------------------------------
+    # Batch precomputation (optimized)
+    # ------------------------------------------------------------------
+
+    def batch_precompute_algo_outputs(self, max_lookback: int = MAX_LOOKBACK) -> None:
+        """
+        Optimized batch version of precompute_algo_outputs().
+
+        Speedups compared to the original:
+
+        Tier 2+3 (TrainablePortfolioAlgorithm):
+          Builds the full (T, n_feat) feature matrix for all days at once using
+          the pre-attached _af_values / _af_index arrays, scales in one call, then
+          batch-predicts all T days in a single sklearn call per algorithm.
+          Reduces ~138 K individual 1-sample sklearn calls to 69 batch calls.
+
+        Tier 1 simple heuristics (EW, RiskParity, Momentum/linear, TrendFollowing):
+          Precomputes rolling vol / pct_change / SMA on the full price history once
+          per unique lookback, then indexes into the pre-built arrays per day.
+
+        Tier 1 complex heuristics (MinVar, MaxDiv, MeanVar) and Momentum/exp:
+          Falls back to the original day-by-day loop (scipy.optimize.minimize is
+          inherently per-day and not parallelisable here).
+
+        Results are stored in self._algo_outputs (same shape / dtype as the
+        original method) so all downstream code is unaffected.
+        """
+        from regime_algo_selection.algorithms.tier1_heuristics import (
+            EqualWeight, RiskParity, Momentum, TrendFollowing,
+        )
+
+        price_idx = self.prices.index
+        T = len(self.dates)
+        ew = np.ones(self.N, dtype=np.float32) / self.N
+        outputs = np.zeros((T, self.K, self.N), dtype=np.float32)
+
+        # ── Step 1: vectorised date → price-index position map ──────────────────
+        print("    [batch] computing date positions ...", flush=True)
+        date_pos = np.full(T, -1, dtype=np.int64)
+        for i, t in enumerate(self.dates):
+            try:
+                date_pos[i] = price_idx.get_loc(t)
+            except KeyError:
+                pass
+        # has_price[i]: date i is in price_idx at position > 0
+        # (position 0 → no history before it → prices_hist would be empty)
+        has_price = date_pos > 0
+
+        # ── Step 2: precompute rolling stats for simple Tier 1 algorithms ───────
+        print("    [batch] precomputing rolling stats for simple Tier 1 ...", flush=True)
+        daily_r = self.prices.pct_change(fill_method=None)
+
+        rolling_vol: dict = {}  # lookback → rolling(L).std() DataFrame
+        rolling_mom: dict = {}  # lookback → pct_change(L) DataFrame
+        rolling_sma: dict = {}  # lookback → rolling(L).mean() DataFrame
+
+        for algo in self.algorithms:
+            if isinstance(algo, RiskParity):
+                L = algo.lookback
+                if L not in rolling_vol:
+                    rolling_vol[L] = daily_r.rolling(L).std()
+            elif isinstance(algo, Momentum) and algo.weighting == "linear":
+                L = algo.lookback
+                if L not in rolling_mom:
+                    rolling_mom[L] = self.prices.pct_change(L)
+            elif isinstance(algo, TrendFollowing):
+                L = algo.lookback
+                if L not in rolling_sma:
+                    rolling_sma[L] = self.prices.rolling(L).mean()
+
+        # ── Step 3: per-algorithm output computation ─────────────────────────────
+        for k, algo in enumerate(self.algorithms):
+            label = f"{algo.name[:45]}"
+            print(
+                f"\r    [batch] algo {k + 1:3d}/{self.K}: {label:<45}",
+                end="", flush=True,
+            )
+
+            # ── Tier 2+3: fully vectorised batch prediction ──────────────────────
+            if (
+                isinstance(algo, TrainablePortfolioAlgorithm)
+                and algo._is_fitted
+                and algo._af_index is not None
+                and algo._scaler is not None
+            ):
+                # For each dataset date t_i, the original code does:
+                #   prices_hist = prices.iloc[start : date_pos[i]]
+                #   algo._get_features_fast(prices_hist.index[-1])
+                #     = searchsorted(af_index, price_idx[date_pos[i]-1].value, "right")
+                # Reproduce this for all i at once.
+                last_price_ns = np.full(T, -1, dtype=np.int64)
+                for i in range(T):
+                    if has_price[i]:
+                        last_price_ns[i] = price_idx[int(date_pos[i]) - 1].value
+
+                af_pos = np.searchsorted(algo._af_index, last_price_ns, side="right")
+
+                in_range = (last_price_ns >= 0) & (af_pos < len(algo._af_index))
+                af_pos_safe = np.clip(af_pos, 0, len(algo._af_index) - 1)
+
+                X_raw = algo._af_values[af_pos_safe]            # (T, n_feat)
+                finite_rows = np.isfinite(X_raw).all(axis=1)   # (T,)
+                valid_af = in_range & finite_rows
+
+                # Rows with invalid features → zero (masked out after softmax)
+                X_all = np.where(valid_af[:, np.newaxis], X_raw, 0.0)
+                X_scaled = algo._scaler.transform(X_all)        # (T, n_feat) scaled
+
+                # Batch predict: Tier 2 has _model (multi-output), Tier 3 has _models (per-asset)
+                if (
+                    hasattr(algo, "_models")
+                    and isinstance(algo._models, dict)
+                    and algo._models
+                ):
+                    # Tier 3: one sklearn model per asset
+                    mu_all = np.column_stack([
+                        algo._models[j].predict(X_scaled)
+                        for j in range(self.N)
+                    ])                                          # (T, N)
+                elif hasattr(algo, "_model") and algo._model is not None:
+                    # Tier 2: single multi-output model
+                    mu_all = algo._model.predict(X_scaled)     # (T, N)
+                else:
+                    outputs[:, k, :] = ew
+                    continue
+
+                # Row-wise numerically stable softmax
+                mu_all = np.where(np.isfinite(mu_all), mu_all, 0.0)
+                mu_all -= mu_all.max(axis=1, keepdims=True)
+                exp_mu = np.exp(mu_all)
+                denom = exp_mu.sum(axis=1, keepdims=True)
+                denom = np.where(denom > 1e-12, denom, 1.0)
+                w_all = (exp_mu / denom).astype(np.float32)    # (T, N)
+
+                # Apply: valid days → predicted weights, invalid → equal weight
+                outputs[:, k, :] = np.where(valid_af[:, np.newaxis], w_all, ew)
+                continue
+
+            # ── Tier 1: EqualWeight (trivially constant) ─────────────────────────
+            if isinstance(algo, EqualWeight):
+                outputs[:, k, :] = ew
+                continue
+
+            # ── Tier 1: RiskParity (vectorised rolling vol) ──────────────────────
+            if isinstance(algo, RiskParity):
+                L = algo.lookback
+                rvol = rolling_vol[L]
+                for i in range(T):
+                    if not has_price[i]:
+                        outputs[i, k] = ew
+                        continue
+                    t_prev = price_idx[int(date_pos[i]) - 1]
+                    if t_prev not in rvol.index:
+                        outputs[i, k] = ew
+                        continue
+                    row = rvol.loc[t_prev].values
+                    if not np.any(np.isfinite(row)):
+                        outputs[i, k] = ew
+                        continue
+                    vols = np.where(np.isfinite(row) & (row > 1e-10), row, 1e-10)
+                    w = 1.0 / vols
+                    s = w.sum()
+                    outputs[i, k] = (w / s).astype(np.float32)
+                continue
+
+            # ── Tier 1: Momentum linear (vectorised pct_change) ──────────────────
+            if isinstance(algo, Momentum) and algo.weighting == "linear":
+                L = algo.lookback
+                rmom = rolling_mom[L]
+                for i in range(T):
+                    if not has_price[i]:
+                        outputs[i, k] = ew
+                        continue
+                    t_prev = price_idx[int(date_pos[i]) - 1]
+                    if t_prev not in rmom.index:
+                        outputs[i, k] = ew
+                        continue
+                    scores = rmom.loc[t_prev].values
+                    scores = np.where(np.isfinite(scores), scores, 0.0)
+                    scores -= scores.max()
+                    w = np.exp(scores)
+                    s = w.sum()
+                    outputs[i, k] = (
+                        (w / s).astype(np.float32) if s > 1e-12 else ew
+                    )
+                continue
+
+            # ── Tier 1: TrendFollowing (vectorised SMA) ───────────────────────────
+            if isinstance(algo, TrendFollowing):
+                L = algo.lookback
+                beta = algo.beta
+                rsma = rolling_sma[L]
+                for i in range(T):
+                    if not has_price[i]:
+                        outputs[i, k] = ew
+                        continue
+                    t_prev = price_idx[int(date_pos[i]) - 1]
+                    if t_prev not in rsma.index:
+                        outputs[i, k] = ew
+                        continue
+                    current = self.prices.loc[t_prev].values
+                    sma_vals = rsma.loc[t_prev].values
+                    signals = (current > sma_vals).astype(float)
+                    if signals.sum() == 0:
+                        outputs[i, k] = ew
+                        continue
+                    raw_w = signals ** beta
+                    s = raw_w.sum()
+                    outputs[i, k] = (raw_w / s).astype(np.float32)
+                continue
+
+            # ── Fallback: original day-by-day loop ────────────────────────────────
+            # Covers: MinVar, MaxDiv, MeanVar (scipy.optimize), Momentum/exp
+            for i, t in enumerate(self.dates):
+                if not has_price[i]:
+                    outputs[i, k] = ew
+                    continue
+                p = int(date_pos[i])
+                start = max(0, p - max_lookback)
+                prices_hist = self.prices.iloc[start:p]
+                if len(prices_hist) < MIN_ALGO_HISTORY:
+                    outputs[i, k] = ew
+                    continue
+                try:
+                    w = algo.compute_weights(prices_hist)
+                    w = np.where(np.isfinite(w), w, 0.0)
+                    w = np.clip(w, 0.0, None)
+                    total = w.sum()
+                    outputs[i, k] = (
+                        (w / total).astype(np.float32) if total > 1e-12 else ew
+                    )
+                except Exception:
+                    outputs[i, k] = ew
+
+        print(f"\r    [batch] Precomputed algo outputs: {self.K}/{self.K} done.        ")
         self._algo_outputs = outputs
 
     # ------------------------------------------------------------------
